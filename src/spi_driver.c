@@ -16,6 +16,10 @@ GPIO_TypeDef *GPIOA = &mock_gpioa;
  */
 #define SIM_FLASH_SIZE (16384) // 16KB mock array representing first 4 sectors of Flash
 static uint8_t g_sim_flash_array[SIM_FLASH_SIZE];
+static int initialized;
+static int forced_busy;
+void SPI_SimSetBusy(int enabled) { forced_busy = enabled; }
+static uint32_t page_base;
 
 /* Flash Chip State variables */
 typedef enum {
@@ -52,27 +56,27 @@ static uint8_t Simulate_Flash_Byte_Transfer(uint8_t mosi) {
     switch (g_sim_state) {
         case FLASH_STATE_CMD:
             g_active_cmd = mosi;
-            
+
             if (g_active_cmd == W25Q_WRITE_ENABLE) {
                 g_write_enabled = 1;
                 g_status_reg1 |= 0x02; // Set WEL (Write Enable Latch) bit
                 g_sim_state = FLASH_STATE_IDLE;
-            } 
+            }
             else if (g_active_cmd == W25Q_WRITE_DISABLE) {
                 g_write_enabled = 0;
                 g_status_reg1 &= ~0x02; // Clear WEL bit
                 g_sim_state = FLASH_STATE_IDLE;
-            } 
+            }
             else if (g_active_cmd == W25Q_READ_STATUS_REG1) {
-                miso = g_status_reg1;
+                miso = g_status_reg1 | (forced_busy ? 1U : 0U);
                 // Keep returning status if master continues clocks
-                g_sim_state = FLASH_STATE_READ_DATA; 
-            } 
-            else if (g_active_cmd == W25Q_READ_DATA || 
-                     g_active_cmd == W25Q_PAGE_PROGRAM || 
+                g_sim_state = FLASH_STATE_READ_DATA;
+            }
+            else if (g_active_cmd == W25Q_READ_DATA ||
+                     g_active_cmd == W25Q_PAGE_PROGRAM ||
                      g_active_cmd == W25Q_SECTOR_ERASE) {
                 g_sim_state = FLASH_STATE_ADDR1;
-            } 
+            }
             else if (g_active_cmd == W25Q_DEVICE_ID) {
                 g_sim_state = FLASH_STATE_ADDR1; // Device ID requires 3 dummy address bytes first
             }
@@ -93,18 +97,19 @@ static uint8_t Simulate_Flash_Byte_Transfer(uint8_t mosi) {
 
         case FLASH_STATE_ADDR3:
             g_transfer_address |= mosi;
-            
+
             if (g_active_cmd == W25Q_READ_DATA) {
                 g_sim_state = FLASH_STATE_READ_DATA;
-            } 
+            }
             else if (g_active_cmd == W25Q_PAGE_PROGRAM) {
                 if (g_write_enabled) {
+                    page_base = g_transfer_address & ~255U;
                     g_sim_state = FLASH_STATE_WRITE_DATA;
                     g_status_reg1 |= 0x01; // Set BUSY bit
                 } else {
                     g_sim_state = FLASH_STATE_IDLE; // Ignored without Write Enable
                 }
-            } 
+            }
             else if (g_active_cmd == W25Q_SECTOR_ERASE) {
                 if (g_write_enabled) {
                     // Erase 4KB sector: fill sector with 0xFF (erased state)
@@ -131,9 +136,9 @@ static uint8_t Simulate_Flash_Byte_Transfer(uint8_t mosi) {
                     miso = 0xFF;
                 }
                 g_transfer_address++; // Auto-increment address for sequential reads
-            } 
+            }
             else if (g_active_cmd == W25Q_READ_STATUS_REG1) {
-                miso = g_status_reg1;
+                miso = g_status_reg1 | (forced_busy ? 1U : 0U);
             }
             else if (g_active_cmd == W25Q_DEVICE_ID) {
                 // Returns Winbond Manufacturer ID (0xEF) followed by Device ID (0x17 for W25Q128)
@@ -149,9 +154,9 @@ static uint8_t Simulate_Flash_Byte_Transfer(uint8_t mosi) {
         case FLASH_STATE_WRITE_DATA:
             if (g_active_cmd == W25Q_PAGE_PROGRAM) {
                 if (g_transfer_address < SIM_FLASH_SIZE) {
-                    g_sim_flash_array[g_transfer_address] = mosi;
+                    g_sim_flash_array[g_transfer_address] &= mosi; /* NOR can only program 1 to 0. */
                 }
-                g_transfer_address++;
+                g_transfer_address = page_base | ((g_transfer_address + 1U) & 255U);
             }
             break;
 
@@ -169,8 +174,9 @@ static uint8_t Simulate_Flash_Byte_Transfer(uint8_t mosi) {
 
 static void Terminate_Flash_Transaction(void) {
     // When CS goes high, internal program/erase finishes (clear BUSY)
-    g_status_reg1 &= ~0x01; // Clear BUSY
-    
+    if (g_active_cmd == W25Q_PAGE_PROGRAM || g_active_cmd == W25Q_SECTOR_ERASE)
+        g_status_reg1 &= ~0x01; // Complete mock write/erase only
+
     // WEL and Write Enable are cleared after Page Program or Sector Erase completes
     if (g_active_cmd == W25Q_PAGE_PROGRAM || g_active_cmd == W25Q_SECTOR_ERASE) {
         g_status_reg1 &= ~0x02; // Clear WEL
@@ -188,6 +194,7 @@ static void Terminate_Flash_Transaction(void) {
  * Initialize SPI1 in Master Mode, 8-bit frame, Mode 0 (CPOL=0, CPHA=0).
  */
 void SPI_Init(void) {
+    if (!initialized) { memset(g_sim_flash_array, 0xFF, sizeof(g_sim_flash_array)); initialized = 1; }
     /* 1. Configure Control Register 1:
      * - Enable SPI Peripheral (SPE)
      * - Configure as Master Device (MSTR)
@@ -208,7 +215,7 @@ void SPI_Init(void) {
 void SPI_CS_Select(void) {
     GPIOA->BSRR = (1 << (4 + 16));  // Reset GPIOA Pin 4 LOW (Assert CS)
     GPIOA->ODR &= ~(1 << 4);        // Update ODR for simulation check
-    
+
     Reset_Flash_State_Machine();    // Hardware event: CS falling edge resets controller
 }
 
@@ -218,7 +225,7 @@ void SPI_CS_Select(void) {
 void SPI_CS_Deselect(void) {
     GPIOA->BSRR = (1 << 4);         // Set GPIOA Pin 4 HIGH (De-assert CS)
     GPIOA->ODR |= (1 << 4);         // Update ODR for simulation check
-    
+
     Terminate_Flash_Transaction();  // Hardware event: CS rising edge terminates write/erase
 }
 

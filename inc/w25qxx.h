@@ -12,6 +12,9 @@
 #define W25Q_SECTOR_ERASE       0x20
 #define W25Q_DEVICE_ID          0x90
 
+/* Host-only fault injection; not a physical peripheral API. */
+void SPI_SimSetBusy(int enabled);
+
 /* SPI Driver Prototypes */
 void SPI_Init(void);
 uint8_t SPI_TransmitReceive(uint8_t data);
@@ -19,12 +22,12 @@ void SPI_CS_Select(void);
 void SPI_CS_Deselect(void);
 
 /* W25Qxx Driver Prototypes */
-void W25Q_Init(void);
+int W25Q_Init(void);
 uint8_t W25Q_ReadStatus(void);
 void W25Q_WriteEnable(void);
-void W25Q_WaitBusy(void);
-void W25Q_SectorErase(uint32_t sector_addr);
-void W25Q_PageProgram(uint32_t page_addr, uint8_t *data, uint16_t size);
+int W25Q_WaitBusy(void);
+int W25Q_SectorErase(uint32_t sector_addr);
+int W25Q_PageProgram(uint32_t page_addr, uint8_t *data, uint16_t size);
 void W25Q_ReadData(uint32_t addr, uint8_t *buffer, uint32_t size);
 uint16_t W25Q_ReadDeviceID(void);
 

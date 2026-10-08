@@ -4,18 +4,20 @@
 /**
  * Initialize SPI and verify communication with the W25Qxx Flash chip by reading its Device ID.
  */
-void W25Q_Init(void) {
+int W25Q_Init(void) {
     SPI_Init();
-    
+
     // Read and verify device ID
     uint16_t device_id = W25Q_ReadDeviceID();
     printf("[W25Qxx-Init] Querying Winbond Chip ID... Expected: 0xEF17, Received: 0x%04X\n", device_id);
-    
+
     if (device_id == 0xEF17) {
         printf("[W25Qxx-Init] W25Q128 Flash detected and ready.\n");
     } else {
         printf("[W25Qxx-Init] ERROR: Unknown Flash Device ID!\n");
+        return -1;
     }
+    return 0;
 }
 
 /**
@@ -24,12 +26,12 @@ void W25Q_Init(void) {
  */
 uint8_t W25Q_ReadStatus(void) {
     uint8_t status = 0;
-    
+
     SPI_CS_Select();
     SPI_TransmitReceive(W25Q_READ_STATUS_REG1);
     status = SPI_TransmitReceive(0x00); // Send dummy byte to shift out status
     SPI_CS_Deselect();
-    
+
     return status;
 }
 
@@ -47,55 +49,55 @@ void W25Q_WriteEnable(void) {
  * Block the CPU until the internal write/erase cycle of the Flash completes.
  * Polls status register 1 until the BUSY bit (bit 0) becomes 0.
  */
-void W25Q_WaitBusy(void) {
-    while (W25Q_ReadStatus() & 0x01) {
-        // Poll status register
+int W25Q_WaitBusy(void) {
+    for (unsigned poll = 0; poll < 1000; ++poll) {
+        if (!(W25Q_ReadStatus() & 0x01)) return 0;
     }
+    return -1; /* Bounded host polling, not a hardware-time deadline. */
 }
 
 /**
  * Erases a 4KB sector of Flash memory starting at sector_addr.
  * Wipes the sector, setting all bytes to 0xFF.
  */
-void W25Q_SectorErase(uint32_t sector_addr) {
+int W25Q_SectorErase(uint32_t sector_addr) {
+    if (sector_addr >= 16384U || W25Q_WaitBusy() != 0) return -1;
     W25Q_WriteEnable();
-    W25Q_WaitBusy();
-    
+
     SPI_CS_Select();
     SPI_TransmitReceive(W25Q_SECTOR_ERASE);
-    
+
     // Send 24-bit address (MSB first)
     SPI_TransmitReceive((sector_addr >> 16) & 0xFF);
     SPI_TransmitReceive((sector_addr >> 8) & 0xFF);
     SPI_TransmitReceive(sector_addr & 0xFF);
-    
+
     SPI_CS_Deselect();
-    W25Q_WaitBusy(); // Block until hardware erase complete
+    return W25Q_WaitBusy();
 }
 
 /**
  * Programs a page of up to 256 bytes in Flash starting at page_addr.
  * Target address range must be erased (0xFF) beforehand.
  */
-void W25Q_PageProgram(uint32_t page_addr, uint8_t *data, uint16_t size) {
-    W25Q_WriteEnable();
-    W25Q_WaitBusy();
-    
-    SPI_CS_Select();
-    SPI_TransmitReceive(W25Q_PAGE_PROGRAM);
-    
-    // Send 24-bit address
-    SPI_TransmitReceive((page_addr >> 16) & 0xFF);
-    SPI_TransmitReceive((page_addr >> 8) & 0xFF);
-    SPI_TransmitReceive(page_addr & 0xFF);
-    
-    // Shift out data array
-    for (uint16_t i = 0; i < size; i++) {
-        SPI_TransmitReceive(data[i]);
+int W25Q_PageProgram(uint32_t page_addr, uint8_t *data, uint16_t size) {
+    if (!data || size == 0 || page_addr >= 16384U || size > 16384U - page_addr) return -1;
+    while (size) {
+        uint16_t chunk = 256U - (page_addr & 255U);
+        if (chunk > size) chunk = size;
+        if (W25Q_WaitBusy() != 0) return -1;
+        W25Q_WriteEnable();
+        SPI_CS_Select();
+        SPI_TransmitReceive(W25Q_PAGE_PROGRAM);
+        SPI_TransmitReceive((page_addr >> 16) & 0xFF);
+        SPI_TransmitReceive((page_addr >> 8) & 0xFF);
+        SPI_TransmitReceive(page_addr & 0xFF);
+        for (uint16_t i = 0; i < chunk; ++i) SPI_TransmitReceive(data[i]);
+        SPI_CS_Deselect();
+        if (W25Q_WaitBusy() != 0) return -1;
+        page_addr += chunk; data += chunk; size -= chunk;
     }
-    
-    SPI_CS_Deselect();
-    W25Q_WaitBusy(); // Block until hardware program complete
+    return 0;
 }
 
 /**
@@ -104,17 +106,17 @@ void W25Q_PageProgram(uint32_t page_addr, uint8_t *data, uint16_t size) {
 void W25Q_ReadData(uint32_t addr, uint8_t *buffer, uint32_t size) {
     SPI_CS_Select();
     SPI_TransmitReceive(W25Q_READ_DATA);
-    
+
     // Send 24-bit address
     SPI_TransmitReceive((addr >> 16) & 0xFF);
     SPI_TransmitReceive((addr >> 8) & 0xFF);
     SPI_TransmitReceive(addr & 0xFF);
-    
+
     // Shift in data bytes sequentially
     for (uint32_t i = 0; i < size; i++) {
         buffer[i] = SPI_TransmitReceive(0x00);
     }
-    
+
     SPI_CS_Deselect();
 }
 
@@ -125,19 +127,19 @@ void W25Q_ReadData(uint32_t addr, uint8_t *buffer, uint32_t size) {
 uint16_t W25Q_ReadDeviceID(void) {
     uint8_t mfg_id = 0;
     uint8_t dev_id = 0;
-    
+
     SPI_CS_Select();
     SPI_TransmitReceive(W25Q_DEVICE_ID);
-    
+
     // 24-bit dummy address
     SPI_TransmitReceive(0x00);
     SPI_TransmitReceive(0x00);
     SPI_TransmitReceive(0x00);
-    
+
     mfg_id = SPI_TransmitReceive(0x00);
     dev_id = SPI_TransmitReceive(0x00);
-    
+
     SPI_CS_Deselect();
-    
+
     return (uint16_t)((mfg_id << 8) | dev_id);
 }

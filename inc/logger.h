@@ -15,7 +15,7 @@
 
 #pragma pack(push, 1) // Force tight packing
 typedef struct {
-    uint32_t timestamp;     /* Seconds since boot */
+    uint32_t timestamp;     /* Monotonic record sequence, not elapsed seconds */
     uint8_t event_type;     /* Event ID */
     uint8_t dtc[3];         /* 3-byte DTC Code */
     uint16_t voltage;       /* Voltage in 0.1V units */
@@ -26,7 +26,7 @@ typedef struct {
 #pragma pack(pop)
 
 /* Logger APIs */
-void Logger_Init(void);
+int Logger_Init(void);
 int Logger_WriteRecord(uint8_t event_type, const uint8_t *dtc, uint16_t voltage, uint8_t temperature);
 void Logger_PrintAllRecords(void);
 uint16_t Compute_CRC16(const uint8_t *data, uint32_t length);
